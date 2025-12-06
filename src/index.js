@@ -322,6 +322,34 @@ function isGitLFSRequest(request, url) {
 }
 
 /**
+ * Detects if a request is for a custom API proxy (e.g., AnyRouter).
+ *
+ * Identifies custom API proxy requests by checking for specific platform prefixes
+ * that require special handling (no caching, support for all HTTP methods).
+ *
+ * @param {URL} url - Parsed URL object
+ * @returns {boolean} True if this is a custom API proxy request
+ *
+ * @example
+ * // AnyRouter API request
+ * const url = new URL('https://example.com/anyrouter/v1/chat/completions');
+ * isCustomAPIRequest(url); // true
+ *
+ * @example
+ * // Regular request
+ * const url = new URL('https://example.com/npm/lodash');
+ * isCustomAPIRequest(url); // false
+ */
+function isCustomAPIRequest(url) {
+  // Check for custom API proxy paths
+  const customAPIPlatforms = ['anyrouter'];
+
+  return customAPIPlatforms.some(platform =>
+    url.pathname.startsWith(`/${platform}/`)
+  );
+}
+
+/**
  * Detects if a request is for an AI inference provider API.
  *
  * Identifies AI inference requests by checking for:
@@ -448,15 +476,16 @@ function isAIInferenceRequest(request, url) {
  * // { valid: false, error: 'Path too long', status: 414 }
  */
 function validateRequest(request, url, config = CONFIG) {
-  // Allow POST method for Git, Git LFS, Docker, and AI inference operations
+  // Allow POST method for Git, Git LFS, Docker, AI inference, and custom API operations
   const isGit = isGitRequest(request, url);
   const isGitLFS = isGitLFSRequest(request, url);
   const isDocker = isDockerRequest(request, url);
   const isAI = isAIInferenceRequest(request, url);
+  const isCustomAPI = isCustomAPIRequest(url);
 
   const allowedMethods =
-    isGit || isGitLFS || isDocker || isAI
-      ? ['GET', 'HEAD', 'POST', 'PUT', 'PATCH']
+    isGit || isGitLFS || isDocker || isAI || isCustomAPI
+      ? ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']
       : config.SECURITY.ALLOWED_METHODS;
 
   if (!allowedMethods.includes(request.method)) {
@@ -853,14 +882,17 @@ async function handleRequest(request, env, ctx) {
     // Check if this is an AI inference request
     const isAI = isAIInferenceRequest(request, url);
 
-    // Check cache first (skip cache for Git, Git LFS, Docker, and AI inference operations)
+    // Check if this is a custom API request
+    const isCustomAPI = isCustomAPIRequest(url);
+
+    // Check cache first (skip cache for Git, Git LFS, Docker, AI inference, and custom API operations)
     // Note: caches API is only available in Cloudflare Workers, not in standard environments
     /** @type {Cache | null} */
     // @ts-ignore - Cloudflare Workers cache API
     const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
     let response;
 
-    if (cache && !isGit && !isGitLFS && !isDocker && !isAI) {
+    if (cache && !isGit && !isGitLFS && !isDocker && !isAI && !isCustomAPI) {
       try {
         // For Range requests, try cache match first
         // Always use GET method for cache key to match how we store (cache.put only accepts GET)
@@ -902,10 +934,10 @@ async function handleRequest(request, env, ctx) {
       redirect: 'follow'
     };
 
-    // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference operations)
+    // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference/Custom API operations)
     if (
-      ['POST', 'PUT', 'PATCH'].includes(request.method) &&
-      (isGit || isGitLFS || isDocker || isAI)
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method) &&
+      (isGit || isGitLFS || isDocker || isAI || isCustomAPI)
     ) {
       fetchOptions.body = request.body;
     }
@@ -913,9 +945,9 @@ async function handleRequest(request, env, ctx) {
     // Cast headers to Headers for proper typing
     const requestHeaders = /** @type {Headers} */ (fetchOptions.headers);
 
-    // Set appropriate headers for Git/Docker/AI vs regular requests
-    if (isGit || isGitLFS || isDocker || isAI) {
-      // For Git/Docker/AI operations, copy all headers from the original request
+    // Set appropriate headers for Git/Docker/AI/Custom API vs regular requests
+    if (isGit || isGitLFS || isDocker || isAI || isCustomAPI) {
+      // For Git/Docker/AI/Custom API operations, copy all headers from the original request
       // This ensures protocol compliance
       for (const [key, value] of request.headers.entries()) {
         // Skip headers that might cause issues with proxying
@@ -977,6 +1009,19 @@ async function handleRequest(request, env, ctx) {
         // Set appropriate User-Agent for AI requests if not present
         if (!requestHeaders.has('User-Agent')) {
           requestHeaders.set('User-Agent', 'Xget-AI-Proxy/1.0');
+        }
+      }
+
+      // For custom API requests, ensure proper content type and headers
+      if (isCustomAPI) {
+        // Ensure JSON content type for API requests if not already set
+        if (['POST', 'PUT', 'PATCH'].includes(request.method) && !requestHeaders.has('Content-Type')) {
+          requestHeaders.set('Content-Type', 'application/json');
+        }
+
+        // Set appropriate User-Agent for custom API requests if not present
+        if (!requestHeaders.has('User-Agent')) {
+          requestHeaders.set('User-Agent', 'Xget-API-Proxy/1.0');
         }
       }
     } else {
@@ -1284,8 +1329,8 @@ async function handleRequest(request, env, ctx) {
     // Prepare response headers
     const headers = new Headers(response.headers);
 
-    if (isGit || isDocker) {
-      // For Git/Docker operations, preserve all headers from the upstream response
+    if (isGit || isDocker || isCustomAPI) {
+      // For Git/Docker/Custom API operations, preserve all headers from the upstream response
       // These protocols are very sensitive to header changes
       // Don't add any additional headers that might interfere with protocol operation
       // The response headers from upstream should be passed through as-is
@@ -1317,7 +1362,7 @@ async function handleRequest(request, env, ctx) {
       headers
     });
 
-    // Cache successful responses (skip caching for Git, Git LFS, Docker, and AI inference operations)
+    // Cache successful responses (skip caching for Git, Git LFS, Docker, AI inference, and custom API operations)
     // Only cache GET requests (HEAD requests cannot be cached due to Cache API limitations)
     // IMPORTANT: Only cache 200 responses, NOT 206 responses (Cloudflare Workers Cache API rejects 206)
     // Note: caching only works in Cloudflare Workers environment
@@ -1327,6 +1372,7 @@ async function handleRequest(request, env, ctx) {
       !isGitLFS &&
       !isDocker &&
       !isAI &&
+      !isCustomAPI &&
       request.method === 'GET' && // Only cache GET requests, not HEAD
       response.ok &&
       response.status === 200 // Only cache complete responses (200), not partial content (206)
@@ -1377,7 +1423,7 @@ async function handleRequest(request, env, ctx) {
     }
 
     monitor.mark('complete');
-    return isGit || isGitLFS || isDocker || isAI
+    return isGit || isGitLFS || isDocker || isAI || isCustomAPI
       ? finalResponse
       : addPerformanceHeaders(finalResponse, monitor);
   } catch (error) {

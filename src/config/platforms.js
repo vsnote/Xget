@@ -97,6 +97,8 @@
  * - `ip-featherlessai` - Featherless AI
  * - `ip-hyperbolic` - Hyperbolic
  *
+ * **Custom API Proxies:**
+ * - `anyrouter` - AnyRouter API
  * **Container Registries (prefix: cr-):**
  * - `cr-docker` - Docker Hub (registry-1.docker.io)
  * - `cr-quay` - Quay.io
@@ -208,7 +210,9 @@ export const PLATFORMS = {
   'ip-poe': 'https://api.poe.com',
   'ip-featherlessai': 'https://api.featherless.ai',
   'ip-hyperbolic': 'https://api.hyperbolic.xyz',
-  'ip-anyrouter': 'https://anyrouter.top',
+
+  // Custom API Proxies
+  anyrouter: 'https://anyrouter.top',
 
   // Container Registries
   'cr-docker': 'https://registry-1.docker.io',
